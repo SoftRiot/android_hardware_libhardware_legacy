@@ -233,6 +233,66 @@ int wifi_load_driver()
     char driver_status[PROPERTY_VALUE_MAX];
     int count = 100; /* wait at most 20 seconds for completion */
 
+	char node[50] = {'\0',};
+    char buf[5] = {'\0',};
+	DIR *dir = opendir("/sys/bus/usb/devices/");
+	struct dirent *dent;
+	if (dir != NULL) {
+		while ((dent = readdir(dir)) != NULL) {
+            memset(node, '\0', 50);
+			sprintf(node, "/sys/bus/usb/devices/%s/idVendor", dent->d_name);
+			int vid_fd = open(node, O_RDONLY);
+            memset(buf, '\0', 5);
+			if (vid_fd > 0) {
+				read(vid_fd, buf, 4);
+				ALOGE("node = %s, vid = %s", node, buf);
+				if (strcmp(buf, "0bda") == 0 || 
+                        strcmp(buf, "148f") == 0 || strcmp(buf, "7392") == 0) {
+					sprintf(node, "/sys/bus/usb/devices/%s/idProduct", dent->d_name);
+					int pid_fd = open(node, O_RDONLY);
+					read(pid_fd, buf, 4);
+					ALOGE("node = %s, pid = %s", node, buf);
+					if (pid_fd > 0) {
+						if (strcmp(buf, "8176") == 0 || strcmp(buf, "7811") == 0 || strcmp(buf, "817a") == 0) {
+							ALOGE("rtl8192cu Wi-Fi Module 3");
+							//wifi module 3 rtl8192cu
+							strcpy(DRIVER_MODULE_NAME, WIFI_DRIVER_MODULE_NAME2);
+							strcpy(DRIVER_MODULE_TAG, WIFI_DRIVER_MODULE_NAME2 " ");
+							strcpy(DRIVER_MODULE_PATH, WIFI_DRIVER_MODULE_PATH2);
+							close(pid_fd);
+							close(vid_fd);
+							break;
+						} else if (strcmp(buf, "8172") == 0) {
+							ALOGE("rtl8191su Wi-Fi Module 2");
+							//wifi module 2 rtl8192cu
+							strcpy(DRIVER_MODULE_NAME, WIFI_DRIVER_MODULE_NAME);
+							strcpy(DRIVER_MODULE_TAG, WIFI_DRIVER_MODULE_NAME " ");
+							strcpy(DRIVER_MODULE_PATH, WIFI_DRIVER_MODULE_PATH);
+							close(pid_fd);
+							close(vid_fd);
+							break;
+                        } else if (strcmp(buf, "5370") == 0) {
+							ALOGE("rt5370 Wi-Fi Module 1");
+							//wifi module 1 rt5370
+							strcpy(DRIVER_MODULE_NAME, WIFI_DRIVER_MODULE_NAME3);
+							strcpy(DRIVER_MODULE_TAG, WIFI_DRIVER_MODULE_NAME3 " ");
+							strcpy(DRIVER_MODULE_PATH, WIFI_DRIVER_MODULE_PATH3);
+							close(pid_fd);
+							close(vid_fd);
+							break;
+                        }
+						close(pid_fd);
+					}
+				}
+				close(vid_fd);
+			}
+		}
+	}
+	close(dir);
+
+	ALOGE("DRIVER_MODULE_NAME = %s", DRIVER_MODULE_NAME);
+	ALOGE("DRIVER_MODULE_PATH = %s", DRIVER_MODULE_PATH);
+
     if (is_wifi_driver_loaded()) {
         return 0;
     }
@@ -336,6 +396,84 @@ int ensure_entropy_file_exists()
     return 0;
 }
 
+int update_ctrl_interface(const char *config_file) {
+
+    int srcfd, destfd;
+    int nread;
+    char ifc[PROPERTY_VALUE_MAX];
+    char *pbuf;
+    char *sptr;
+    struct stat sb;
+    int ret;
+
+    if (stat(config_file, &sb) != 0)
+        return -1;
+
+    pbuf = malloc(sb.st_size + PROPERTY_VALUE_MAX);
+    if (!pbuf)
+        return 0;
+    srcfd = TEMP_FAILURE_RETRY(open(config_file, O_RDONLY));
+    if (srcfd < 0) {
+        ALOGE("Cannot open \"%s\": %s", config_file, strerror(errno));
+        free(pbuf);
+        return 0;
+    }
+    nread = TEMP_FAILURE_RETRY(read(srcfd, pbuf, sb.st_size));
+    close(srcfd);
+    if (nread < 0) {
+        ALOGE("Cannot read \"%s\": %s", config_file, strerror(errno));
+        free(pbuf);
+        return 0;
+    }
+
+    if (!strcmp(config_file, SUPP_CONFIG_FILE)) {
+        property_get("wifi.interface", ifc, WIFI_TEST_INTERFACE);
+    } else {
+        strcpy(ifc, CONTROL_IFACE_PATH);
+    }
+    /* Assume file is invalid to begin with */
+    ret = -1;
+    /*
+     * if there is a "ctrl_interface=<value>" entry, re-write it ONLY if it is
+     * NOT a directory.  The non-directory value option is an Android add-on
+     * that allows the control interface to be exchanged through an environment
+     * variable (initialized by the "init" program when it starts a service
+     * with a "socket" option).
+     *
+     * The <value> is deemed to be a directory if the "DIR=" form is used or
+     * the value begins with "/".
+     */
+    if ((sptr = strstr(pbuf, "ctrl_interface="))) {
+        ret = 0;
+        if ((!strstr(pbuf, "ctrl_interface=DIR=")) &&
+                (!strstr(pbuf, "ctrl_interface=/"))) {
+            char *iptr = sptr + strlen("ctrl_interface=");
+            int ilen = 0;
+            int mlen = strlen(ifc);
+            int nwrite;
+            if (strncmp(ifc, iptr, mlen) != 0) {
+                ALOGE("ctrl_interface != %s", ifc);
+                while (((ilen + (iptr - pbuf)) < nread) && (iptr[ilen] != '\n'))
+                    ilen++;
+                mlen = ((ilen >= mlen) ? ilen : mlen) + 1;
+                memmove(iptr + mlen, iptr + ilen + 1, nread - (iptr + ilen + 1 - pbuf));
+                memset(iptr, '\n', mlen);
+                memcpy(iptr, ifc, strlen(ifc));
+                destfd = TEMP_FAILURE_RETRY(open(config_file, O_RDWR, 0660));
+                if (destfd < 0) {
+                    ALOGE("Cannot update \"%s\": %s", config_file, strerror(errno));
+                    free(pbuf);
+                    return -1;
+                }
+                TEMP_FAILURE_RETRY(write(destfd, pbuf, nread + mlen - ilen -1));
+                close(destfd);
+            }
+        }
+    }
+    free(pbuf);
+    return ret;
+}
+
 int ensure_config_file_exists(const char *config_file)
 {
     char buf[2048];
@@ -351,7 +489,14 @@ int ensure_config_file_exists(const char *config_file)
             ALOGE("Cannot set RW to \"%s\": %s", config_file, strerror(errno));
             return -1;
         }
-        return 0;
+        /* return if we were able to update control interface properly */
+        if (update_ctrl_interface(config_file) >=0) {
+            return 0;
+        } else {
+            /* This handles the scenario where the file had bad data
+             * for some reason. We continue and recreate the file.
+             */
+        }
     } else if (errno != ENOENT) {
         ALOGE("Cannot access \"%s\": %s", config_file, strerror(errno));
         return -1;
@@ -398,7 +543,7 @@ int ensure_config_file_exists(const char *config_file)
         unlink(config_file);
         return -1;
     }
-    return 0;
+    return update_ctrl_interface(config_file);
 }
 
 int wifi_start_supplicant(int p2p_supported)
@@ -790,6 +935,7 @@ int wifi_change_fw_path(const char *fwpath)
     int fd;
     int ret = 0;
 
+#if !defined(WIFI_VENDOR_REALTEK)
     if (!fwpath)
         return ret;
     fd = TEMP_FAILURE_RETRY(open(WIFI_DRIVER_FW_PATH_PARAM, O_WRONLY));
@@ -803,5 +949,6 @@ int wifi_change_fw_path(const char *fwpath)
         ret = -1;
     }
     close(fd);
+#endif    
     return ret;
 }
